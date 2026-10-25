@@ -1,0 +1,33 @@
+# Dependencias
+node_modules/
+
+# Variables de entorno
+.env
+.env.local
+.env.*.local
+
+# Archivos subidos
+uploads/
+public/uploads/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Build / Coverage
+dist/
+build/
+coverage/
+
+# Testing
+.nyc_output/
