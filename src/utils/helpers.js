@@ -38,4 +38,21 @@ const formatPagination = (total, page, limit) => {
   };
 };
 
-module.exports = { filterObj, paginate, formatPagination };
+/**
+ * Convierte un texto a slug URL-friendly.
+ * - Normaliza tildes
+ * - Minúsculas, guiones, sin caracteres especiales
+ */
+const slugify = (str) => {
+  return str
+    .toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/[\s_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+};
+
+module.exports = { filterObj, paginate, formatPagination, slugify };
