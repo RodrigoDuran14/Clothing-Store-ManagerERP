@@ -27,11 +27,19 @@ const createSendToken = (
   res,
   message = 'Autenticación exitosa'
 ) => {
-  const token = signToken({ id: user._id, role: user.role });
+  const token = signToken({
+    id: user._id,
+    role: user.role,
+    partnerId: user.partnerId || null,
+  });
 
-  // Convertir a objeto plano y remover password
-  const userObj = user.toObject ? user.toObject() : { ...user };
+  const userObj = user.toObject
+    ? user.toObject({ virtuals: true })
+    : { ...user };
   delete userObj.password;
+  delete userObj.resetPasswordToken;
+  delete userObj.resetPasswordExpire;
+  delete userObj.__v;
 
   return res.status(statusCode).json({
     success: true,
