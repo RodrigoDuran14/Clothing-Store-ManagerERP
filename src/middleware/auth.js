@@ -49,4 +49,27 @@ const protect = async (req, res, next) => {
   }
 };
 
-module.exports = { protect };
+/**
+ * Autenticación opcional: si hay token válido, carga req.user.
+ * Si no hay token o es inválido, continúa como invitado (no bloquea).
+ * Útil para endpoints públicos que muestran más datos a staff autenticado.
+ */
+const softProtect = async (req, res, next) => {
+  try {
+    const header = req.headers.authorization;
+    if (!header || !header.startsWith('Bearer ')) return next();
+
+    const token = header.split(' ')[1];
+    const decoded = verifyToken(token);
+    const user = await User.findById(decoded.id);
+
+    if (user && user.isActive && !user.changedPasswordAfter(decoded.iat)) {
+      req.user = user;
+    }
+  } catch {
+    // Ignorar: invitado
+  }
+  next();
+};
+
+module.exports = { protect, softProtect };
