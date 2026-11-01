@@ -52,7 +52,8 @@ app.get('/api', (req, res) => {
         users: '/api/users',
         categories: '/api/categories',
         suppliers: '/api/suppliers',
-        products: '/api/products'
+        products: '/api/products',
+        clients: '/api/clients'
       },
     },
     message: 'Bienvenido a la API de Clothing Store Manager',
@@ -67,13 +68,14 @@ const userRoutes = require('./src/routes/userRoutes');
 const categoryRoutes = require('./src/routes/categoryRoutes');
 const supplierRoutes = require('./src/routes/supplierRoutes'); 
 const productRoutes = require('./src/routes/productRoutes')
+const clientRoutes = require('./src/routes/clientRoutes')
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/categories', categoryRoutes); 
 app.use('/api/suppliers', supplierRoutes);
 app.use('/api/products', productRoutes);
-
+app.use('./api/clients', clientRoutes)
 /* =========================================================
  *  Middleware 404 y manejo centralizado de errores
  * ========================================================= */
