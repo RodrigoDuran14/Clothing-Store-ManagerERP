@@ -70,12 +70,12 @@ router.patch(
   sellerController.updateShift
 );
 
-router.delete(
-  '/:id/shifts/:shiftId',
+router.patch(
+  '/:id/shifts/:shiftId/toggle',
   isAdmin,
   shiftIdParamValidator,
   validate,
-  sellerController.deleteShift
+  sellerController.toggleShift
 );
 
 /* =========================================================

@@ -338,7 +338,13 @@ exports.updateShift = async (req, res, next) => {
   }
 };
 
-exports.deleteShift = async (req, res, next) => {
+/* =========================================================
+ *  PATCH /api/sellers/:id/shifts/:shiftId/toggle
+ *  Activa/desactiva un turno (soft delete).
+ *  Acepta `isActive` explícito en body para operaciones idempotentes;
+ *  si no viene, hace toggle.
+ * ========================================================= */
+exports.toggleShift = async (req, res, next) => {
   try {
     const seller = await Seller.findById(req.params.id);
     if (!seller) return next(new AppError('Vendedor no encontrado', 404));
@@ -346,13 +352,33 @@ exports.deleteShift = async (req, res, next) => {
     const shift = seller.shifts.id(req.params.shiftId);
     if (!shift) return next(new AppError('Turno no encontrado', 404));
 
-    seller.shifts.pull(req.params.shiftId);
+    const newStatus =
+      req.body.isActive !== undefined ? !!req.body.isActive : !shift.isActive;
+
+    // Idempotencia: si no cambia nada, responde 200 sin tocar la DB
+    if (newStatus === shift.isActive) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          shift,
+          allShifts: seller.shifts,
+          activeCount: seller.shifts.filter((s) => s.isActive).length,
+        },
+        message: `El turno ya estaba ${shift.isActive ? 'activo' : 'inactivo'}`,
+      });
+    }
+
+    shift.isActive = newStatus;
     await seller.save();
 
     res.status(200).json({
       success: true,
-      data: seller.shifts,
-      message: 'Turno eliminado correctamente',
+      data: {
+        shift,
+        allShifts: seller.shifts,
+        activeCount: seller.shifts.filter((s) => s.isActive).length,
+      },
+      message: `Turno ${newStatus ? 'restaurado' : 'desactivado'} correctamente`,
     });
   } catch (error) {
     next(error);
