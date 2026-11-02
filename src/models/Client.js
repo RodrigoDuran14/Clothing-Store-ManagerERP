@@ -4,7 +4,7 @@ const AppError = require("../utils/AppError");
 const GENDERS = ["M", "F", "X", "unspecified"];
 const CLIENT_CATEGORIES = ["new", "occasional", "frequent", "vip", "inactive"];
 const MOVEMENT_TYPES = ["purchase", "payment", "return", "adjustment"];
-const PURCHASE_STATUSES = ["completed", "cancelled", "returned", "pending"];
+const PURCHASE_STATUSES = ["completed", "cancelled", "returned","partially_returned", "pending"];
 
 /* =========================================================
  *  Subdocumentos
@@ -39,14 +39,14 @@ const purchaseEntrySchema = new mongoose.Schema(
   {
     saleId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Sale",
+      ref: 'Sale',
       required: true,
     },
     date: { type: Date, default: Date.now },
     total: { type: Number, required: true, min: 0 },
     products: [
       {
-        productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product" },
+        productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
         name: String,
         quantity: Number,
         price: Number,
@@ -58,10 +58,14 @@ const purchaseEntrySchema = new mongoose.Schema(
     status: {
       type: String,
       enum: PURCHASE_STATUSES,
-      default: "completed",
+      default: 'completed',
     },
+
+    /* tracking de devoluciones */
+    returnedTotal: { type: Number, default: 0, min: 0 },
+    lastReturnDate: { type: Date, default: null },
   },
-  { _id: true },
+  { _id: true }
 );
 
 const addressSchema = new mongoose.Schema(
