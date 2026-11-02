@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const Seller = require('../models/Seller')
 const AppError = require('../utils/AppError');
 const { paginate, formatPagination } = require('../utils/helpers');
 const { ROLES } = require('../config/roles');
@@ -191,6 +192,44 @@ exports.updateUserRole = async (req, res, next) => {
     // Coherencia role ↔ partnerId
     assertRolePartnerCoherence(role, nextPartnerId);
 
+     // manejo del Seller asociado
+    const seller = await Seller.findOne({ userId: user._id, isActive: true });
+
+    if (seller) {
+      const wasSellerRole =
+        user.role === ROLES.EMPLOYEE || user.role === ROLES.PARTNER;
+      const isSellerRole =
+        role === ROLES.EMPLOYEE || role === ROLES.PARTNER;
+
+      // Caso 1: sale del ámbito "vendedor" → debe archivar el Seller primero
+      if (wasSellerRole && !isSellerRole) {
+        return next(
+          new AppError(
+            'Este usuario tiene un registro de vendedor activo. Desactívelo primero',
+            400
+          )
+        );
+      }
+
+      // Caso 2: employee ↔ partner → sincronizar
+      if (isSellerRole && seller.role !== role) {
+        // Si pasa a partner y tiene comisiones pendientes, bloquear
+        if (role === ROLES.PARTNER && seller.pendingCommission > 0) {
+          return next(
+            new AppError(
+              `Este vendedor tiene comisiones pendientes ($${seller.pendingCommission}). ` +
+                'Páguelas antes de promoverlo a partner.',
+              400
+            )
+          );
+        }
+
+        seller.role = role;
+        // Si pasa a partner, el pre('save') del Seller anula las comisiones
+        await seller.save();
+      }
+    }
+
     // No degradar al último admin activo
     if (user.role === ROLES.ADMIN && user.isActive && role !== ROLES.ADMIN) {
       const activeAdmins = await User.countDocuments({
@@ -215,6 +254,13 @@ exports.updateUserRole = async (req, res, next) => {
       user.partnerId = null;
     }
     await user.save();
+
+    // Sincronizar displayName del Seller (por si el nombre cambió)
+    if (seller) {
+      seller.displayName = user.name;
+      seller.partnerId = user.partnerId || null;
+      await seller.save();
+    }
 
     res.status(200).json({
       success: true,
