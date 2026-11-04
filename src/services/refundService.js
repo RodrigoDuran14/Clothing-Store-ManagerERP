@@ -1,4 +1,3 @@
-const crypto = require('crypto');
 const Sale = require('../models/Sale');
 const Client = require('../models/Client');
 const Seller = require('../models/Seller');
@@ -8,12 +7,13 @@ const Return = require('../models/Return');
 const AppError = require('../utils/AppError');
 const stockService = require('./stockService');
 const partnerSplitService = require('./partnerSplitService');
+const voucherService = require('./voucherService'); 
 
 /* =========================================================
  *  Constantes
  * ========================================================= */
 const DEFAULT_RETURN_PERIOD_DAYS = 30;
-const VOUCHER_VALIDITY_DAYS = 90;
+const VOUCHER_VALIDITY_DAYS = Number(process.env.VOUCHER_VALIDITY_DAYS) || 90;
 
 /* =========================================================
  *  Utilidades
@@ -59,13 +59,6 @@ const calculateRefundAmount = (items, sale) => {
   const tax = Number(((subtotal * taxRate) / 100).toFixed(2));
   const total = Number((subtotal + tax).toFixed(2));
   return { subtotal, tax, total, taxRate };
-};
-
-/**
- * Genera un código de voucher único tipo "VCH-XXXXXX".
- */
-const generateVoucherCode = () => {
-  return `VCH-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 };
 
 /* =========================================================
@@ -460,19 +453,29 @@ const processReturn = async (returnDoc, actor) => {
         }
       }
 
-      // 5b. Voucher
-      if (returnDoc.refundMethod === 'voucher') {
-        refundDetails.voucherCode = generateVoucherCode();
-        refundDetails.voucherExpiresAt = new Date(
+      // 5b. Voucher → emitir voucher real
+    if (returnDoc.refundMethod === 'voucher') {
+      const voucher = await voucherService.issueVoucher({
+        type: 'return_credit',
+        origin: 'return',
+        originalAmount: totalToRefundToClient,
+        clientId: originalSale.clientId || null,
+        returnId: returnDoc._id,
+        issuedSaleId: originalSale._id,
+        expiresAt: new Date(
           Date.now() + VOUCHER_VALIDITY_DAYS * 24 * 60 * 60 * 1000
-        );
-      }
+        ),
+        notes: `Devolución ${returnDoc.returnNumber}`,
+        createdBy: actor._id,
+      });
 
+      refundDetails.voucherCode = voucher.code;
+      refundDetails.voucherExpiresAt = voucher.expiresAt;
+      refundDetails.method = 'voucher';
+      refundDetails.amount = totalToRefundToClient;
       refundDetails.processedAt = new Date();
       refundDetails.processedBy = actor._id;
-      if (returnDoc.refundDetails?.reference) {
-        refundDetails.reference = returnDoc.refundDetails.reference;
-      }
+    }
     }
 
     /* ---------- 6. Historial del cliente (marcar compra original) ---------- */
@@ -549,7 +552,6 @@ module.exports = {
   validateReturnPeriod,
   canReturnProduct,
   calculateRefundAmount,
-  generateVoucherCode,
   // Internals (exportados para tests)
   revertCommission,
   adjustPartnerSplits,

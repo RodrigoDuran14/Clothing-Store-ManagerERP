@@ -263,6 +263,11 @@ exports.createReturn = async (req, res, next) => {
       balanceDue = Number((exchTotal - refund.total).toFixed(2));
     }
 
+    const resolvedRefundMethod = 
+      type === 'refund'
+        ? refundMethod || 'voucher'
+        : refundMethod || null;
+
     /* ---------- 6. Crear Return ---------- */
     const returnDoc = await Return.create({
       saleId: sale._id,
@@ -279,7 +284,7 @@ exports.createReturn = async (req, res, next) => {
       exchangeTax: exchangeAmounts.tax,
       exchangeTotal: exchangeAmounts.total,
       balanceDue,
-      refundMethod: refundMethod || null,
+      refundMethod: resolvedRefundMethod,
       reasonType,
       reason,
       clientNotes: clientNotes || null,
