@@ -135,6 +135,7 @@ exports.getVoucherByCode = async (req, res, next) => {
       data: {
         _id: voucher._id,
         code: voucher.code,
+        barcode: voucher.barcode,
         type: voucher.type,
         status: voucher.status,
         originalAmount: voucher.originalAmount,
@@ -148,6 +149,38 @@ exports.getVoucherByCode = async (req, res, next) => {
         issuedTo: voucher.issuedTo,
       },
       message: 'Voucher obtenido correctamente',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/* =========================================================
+ *  GET /api/vouchers/by-barcode/:barcode
+ * ========================================================= */
+exports.getVoucherByBarcode = async (req, res, next) => {
+  try {
+    const voucher = await voucherService.findByBarcode(req.params.barcode);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        _id: voucher._id,
+        code: voucher.code,
+        barcode: voucher.barcode,
+        type: voucher.type,
+        status: voucher.status,
+        originalAmount: voucher.originalAmount,
+        remainingAmount: voucher.remainingAmount,
+        expiresAt: voucher.expiresAt,
+        isRedeemable: voucher.isRedeemable,
+        isExpired: voucher.isExpired,
+        minimumPurchase: voucher.minimumPurchase,
+        isStackable: voucher.isStackable,
+        clientId: voucher.clientId,
+        issuedTo: voucher.issuedTo,
+      },
+      message: 'Voucher obtenido correctamente por código de barras',
     });
   } catch (error) {
     next(error);

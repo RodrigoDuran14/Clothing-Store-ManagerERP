@@ -1,5 +1,6 @@
 const Voucher = require('../models/Voucher');
 const AppError = require('../utils/AppError');
+const { looksLikeEAN13 } = require('./barcodeService'); 
 
 /* =========================================================
  *  Emisión
@@ -92,7 +93,27 @@ const issueBulkVouchers = async (template, count, createdBy) => {
  * ========================================================= */
 
 /**
- * Busca un voucher por código. Lanza 404 si no existe.
+ * Resuelve un input a un documento Voucher.
+ * Acepta code alfanumérico ('VCH-A1B2') o barcode EAN-13 ('7770123456789').
+ */
+const resolveVoucher = async (input) => {
+  const str = String(input).trim();
+  if (!str) throw new AppError('Código o barcode vacío', 400);
+
+  // Detectar formato
+  if (looksLikeEAN13(str)) {
+    const v = await Voucher.findOne({ barcode: str });
+    if (v) return v;
+    throw new AppError(`Voucher no encontrado para barcode: ${str}`, 404);
+  }
+
+  const v = await Voucher.findOne({ code: str.toUpperCase() });
+  if (v) return v;
+  throw new AppError(`Voucher no encontrado: ${str.toUpperCase()}`, 404);
+};
+
+/**
+ * Busca un voucher por código alfanumérico (retrocompatible).
  */
 const findByCode = async (code) => {
   const normalized = String(code).toUpperCase().trim();
@@ -101,26 +122,42 @@ const findByCode = async (code) => {
   return voucher;
 };
 
+/**
+ * Busca un voucher por barcode EAN-13.
+ */
+const findByBarcode = async (barcode) => {                                  // 👈 NUEVO
+  const normalized = String(barcode).trim();
+  if (!looksLikeEAN13(normalized)) {
+    throw new AppError('El código no tiene formato EAN-13 (13 dígitos)', 400);
+  }
+  const voucher = await Voucher.findOne({ barcode: normalized });
+  if (!voucher) {
+    throw new AppError(`Voucher no encontrado para barcode: ${normalized}`, 404);
+  }
+  return voucher;
+};
+
 /* =========================================================
  *  Validación (para usar en una venta)
  * ========================================================= */
 
 /**
- * Valida un código de voucher contra un contexto de venta.
- * Read-only. Devuelve info con `ok` y `reason`.
+ * Valida un código o barcode contra un contexto de venta.
+ * Acepta ambos formatos indistintamente.
  */
-const validateForSale = async (code, saleContext) => {
+const validateForSale = async (input, saleContext) => {
   let voucher;
   try {
-    voucher = await findByCode(code);
+    voucher = await resolveVoucher(input);
   } catch (err) {
-    return { ok: false, reason: 'not-found', code };
+    return { ok: false, reason: 'not-found', input };
   }
 
   const check = voucher.canBeUsedOn(saleContext);
   return {
     ...check,
     code: voucher.code,
+    barcode: voucher.barcode,
     voucherId: voucher._id,
     type: voucher.type,
     remainingAmount: voucher.remainingAmount,
@@ -209,18 +246,21 @@ const distributeAmount = (vouchers, totalToApply) => {
  * ========================================================= */
 
 /**
- * Redime un voucher sobre una venta.
+ * Redime un voucher (por code o barcode) sobre una venta.
  * Usa actualización atómica para evitar dobles usos concurrentes.
  */
-const redeemVoucher = async (code, saleId, amount, userId) => {
-  const normalized = String(code).toUpperCase().trim();
+const redeemVoucher = async (input, saleId, amount, userId) => {
   const amt = Number(amount);
   if (!Number.isFinite(amt) || amt <= 0) {
     throw new AppError('El monto a redimir debe ser positivo', 400);
   }
 
+  // Resolver a code (fuente de verdad)
+  const voucher = await resolveVoucher(input);
+  const normalized = voucher.code;
+
   // Check + increment atómico
-  const voucher = await Voucher.findOneAndUpdate(
+  const updated = await Voucher.findOneAndUpdate(
     {
       code: normalized,
       status: 'active',
@@ -231,29 +271,28 @@ const redeemVoucher = async (code, saleId, amount, userId) => {
     { new: true }
   );
 
-  if (!voucher) {
+  if (!updated) {
     throw new AppError(
       `Voucher ${normalized} no disponible para redención (ya usado, expirado o saldo insuficiente)`,
       400
     );
   }
 
-  // Redondear por seguridad (el $inc puede dejar residuo de coma flotante)
-  voucher.remainingAmount = Number(voucher.remainingAmount.toFixed(2));
+  updated.remainingAmount = Number(updated.remainingAmount.toFixed(2));
 
-  voucher.redemptions.push({
+  updated.redemptions.push({
     saleId,
     amount: amt,
     redeemedBy: userId,
     redeemedAt: new Date(),
   });
 
-  if (voucher.remainingAmount === 0 || voucher.usageCount >= voucher.maxUses) {
-    voucher.status = 'redeemed';
+  if (updated.remainingAmount === 0 || updated.usageCount >= updated.maxUses) {
+    updated.status = 'redeemed';
   }
 
-  await voucher.save();
-  return voucher;
+  await updated.save();
+  return updated;
 };
 
 /**
@@ -380,6 +419,8 @@ module.exports = {
   issueVoucher,
   issueBulkVouchers,
   findByCode,
+  findByBarcode,
+  resolveVoucher,
   validateForSale,
   validateMultipleForSale,
   distributeAmount,

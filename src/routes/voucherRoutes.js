@@ -10,6 +10,7 @@ const {
   cancelVoucherValidator,
   voucherIdParamValidator,
   codeParamValidator,
+  barcodeParamValidator,
   clientIdParamValidator,
   listQueryValidator,
 } = require('../validators/voucherValidator');
@@ -26,6 +27,13 @@ router.get(
   codeParamValidator,
   validate,
   voucherController.getVoucherByCode
+);
+
+router.get(
+  '/by-barcode/:barcode',
+  barcodeParamValidator,
+  validate,
+  voucherController.getVoucherByBarcode
 );
 
 router.get(

@@ -165,6 +165,16 @@ const voucherIdParamValidator = [paramObjectId('id', 'ID de voucher')];
 const codeParamValidator = [
   param('code').trim().notEmpty().withMessage('El código es obligatorio'),
 ];
+
+const barcodeParamValidator = [
+  param('barcode')
+    .trim()
+    .notEmpty()
+    .withMessage('El código de barras es obligatorio')
+    .matches(/^\d{13}$/)
+    .withMessage('El código de barras debe tener 13 dígitos'),
+];
+
 const clientIdParamValidator = [paramObjectId('clientId', 'ID de cliente')];
 
 const listQueryValidator = [
@@ -181,6 +191,7 @@ module.exports = {
   cancelVoucherValidator,
   voucherIdParamValidator,
   codeParamValidator,
+  barcodeParamValidator,
   clientIdParamValidator,
   listQueryValidator,
 };
