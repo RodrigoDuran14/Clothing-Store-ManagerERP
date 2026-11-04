@@ -15,6 +15,7 @@ const voucherUsedSchema = new mongoose.Schema(
   {
     voucherId: { type: mongoose.Schema.Types.ObjectId, ref: 'Voucher', required: true },
     code: { type: String, required: true, uppercase: true },
+    barcode: { type: String, default: null },
     amount: { type: Number, required: true, min: 0.01 },
   },
   { _id: false }

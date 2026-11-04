@@ -229,6 +229,19 @@ exports.createSale = async (req, res, next) => {
 
     const fullPaid = totalPaid >= payableAmount - 0.01;
 
+        // Buscar los barcodes de los vouchers resueltos
+    const voucherBarcodeMap = {};
+    for (const v of voucherValidation.vouchers) {
+      voucherBarcodeMap[v.code] = v.barcode || null;
+    }
+
+    const vouchersUsedEnriched = vouchersWithAmounts.map((v) => ({
+      voucherId: v.voucherId,
+      code: v.code,
+      barcode: voucherBarcodeMap[v.code] || null,
+      amount: v.amount,
+    }));
+
     let sale;
     try {
       sale = await Sale.create({
@@ -243,7 +256,7 @@ exports.createSale = async (req, res, next) => {
         taxRate,
         taxAmount,
         total,
-        vouchersUsed: vouchersWithAmounts,
+        vouchersUsed: vouchersUsedEnriched,
         payments: payments.map((p) => ({
           method: p.method,
           amount: Number(p.amount),
