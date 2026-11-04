@@ -11,6 +11,15 @@ const DISCOUNT_TYPES = ['amount', 'percentage'];
 /* =========================================================
  *  Subdocumentos
  * ========================================================= */
+const voucherUsedSchema = new mongoose.Schema(
+  {
+    voucherId: { type: mongoose.Schema.Types.ObjectId, ref: 'Voucher', required: true },
+    code: { type: String, required: true, uppercase: true },
+    amount: { type: Number, required: true, min: 0.01 },
+  },
+  { _id: false }
+);
+
 const saleItemSchema = new mongoose.Schema(
   {
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
@@ -74,6 +83,7 @@ const saleSchema = new mongoose.Schema(
     currency: { type: String, default: 'ARS', uppercase: true },
 
     payments: { type: [paymentSchema], default: [] },
+    vouchersUsed: { type: [voucherUsedSchema], default: [] },
     paymentStatus: { type: String, enum: PAYMENT_STATUSES, default: 'pending' },
 
     status: { type: String, enum: SALE_STATUSES, default: 'pending' },
@@ -124,13 +134,22 @@ saleSchema.virtual('paidAmount').get(function () {
   return (this.payments || []).reduce((s, p) => s + (p.amount || 0), 0);
 });
 
+saleSchema.virtual('voucherAmount').get(function () {
+  return (this.vouchersUsed || []).reduce((s, v) => s + (v.amount || 0), 0);
+});
+
+saleSchema.virtual('payableAmount').get(function () {
+  return Math.max(0, Number((this.total - this.voucherAmount).toFixed(2)));
+});
+
 saleSchema.virtual('pendingBalance').get(function () {
-  return Math.max(0, Number((this.total - this.paidAmount).toFixed(2)));
+  return Math.max(0, Number((this.payableAmount - this.paidAmount).toFixed(2)));
 });
 
 saleSchema.virtual('paymentPercentage').get(function () {
   if (!this.total || this.total <= 0) return 0;
-  return Number(Math.min(100, (this.paidAmount / this.total) * 100).toFixed(2));
+  const covered = this.paidAmount + this.voucherAmount;
+  return Number(Math.min(100, (covered / this.total) * 100).toFixed(2));
 });
 
 saleSchema.virtual('itemCount').get(function () {
@@ -186,7 +205,7 @@ saleSchema.methods.addPayment = function (paymentData) {
   }
 
   const newPaid = this.paidAmount + amt;
-  if (newPaid > this.total + 0.01) {
+  if (newPaid > this.payableAmount  + 0.01) {
     throw new AppError(
       `El pago ($${amt}) excede el saldo pendiente ($${this.pendingBalance})`,
       400
@@ -195,7 +214,7 @@ saleSchema.methods.addPayment = function (paymentData) {
 
   this.payments.push({ ...paymentData, amount: amt, date: new Date() });
 
-  if (newPaid >= this.total - 0.01) {
+  if (newPaid >= this.payableAmount  - 0.01) {
     this.paymentStatus = 'paid';
     if (this.status === 'pending') {
       this.status = 'completed';

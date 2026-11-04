@@ -66,6 +66,18 @@ const createSaleValidator = [
   body('payments.*.reference').optional({ values: 'falsy' }).isString().trim().isLength({ max: 100 }),
   body('payments.*.installments').optional().isInt({ min: 1 }),
 
+  body('voucherCodes')
+    .optional()
+    .isArray()
+    .withMessage('voucherCodes debe ser un array de códigos'),
+  body('voucherCodes.*')
+    .optional()
+    .isString()
+    .trim()
+    .notEmpty()
+    .withMessage('Cada código de voucher debe ser un string no vacío')
+    .isLength({ max: 50 }),
+
   body('channel')
     .optional()
     .isIn(CHANNELS)

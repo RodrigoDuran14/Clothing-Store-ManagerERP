@@ -7,6 +7,7 @@ const AppError = require('../utils/AppError');
 const stockService = require('../services/stockService');
 const partnerSplitService = require('../services/partnerSplitService');
 const creditService = require('../services/creditService');
+const voucherService = require('../services/voucherService');
 const { paginate, formatPagination } = require('../utils/helpers');
 const { ROLES } = require('../config/roles');
 
@@ -142,12 +143,53 @@ exports.createSale = async (req, res, next) => {
     const taxAmount = Number(((afterDiscount * Number(taxRate)) / 100).toFixed(2));
     const total = Number((afterDiscount + taxAmount).toFixed(2));
 
-    /* ---------- 5. Validar pagos ---------- */
+
+        /* ---------- 5. Validar vouchers (si vienen) ---------- */
+    const voucherCodes = req.body.voucherCodes || [];
+    let voucherValidation = { valid: true, vouchers: [], totalAvailable: 0, issues: [] };
+    let voucherAmount = 0;
+    let payableAmount = total;
+
+    if (voucherCodes.length > 0) {
+      const productIds = saleItems.map((i) => i.productId);
+      const categoryIds = [];
+      for (const pid of productIds) {
+        const p = await Product.findById(pid).select('categoryId').lean();
+        if (p && p.categoryId) categoryIds.push(p.categoryId);
+      }
+
+      voucherValidation = await voucherService.validateMultipleForSale(
+        voucherCodes,
+        {
+          total,
+          channel,
+          clientId: client?._id || null,
+          productIds,
+          categoryIds,
+        }
+      );
+
+      if (!voucherValidation.valid) {
+        return next(
+          new AppError(
+            `Vouchers inválidos: ${voucherValidation.issues
+              .map((i) => `${i.code || ''} ${i.reason}`)
+              .join(', ')}`,
+            400
+          )
+        );
+      }
+
+      voucherAmount = Math.min(voucherValidation.totalAvailable, total);
+      payableAmount = Number((total - voucherAmount).toFixed(2));
+    }
+
+    /* ---------- 6. Validar pagos (contra payableAmount) -----*/
     const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
-    if (totalPaid > total + 0.01) {
+    if (totalPaid > payableAmount + 0.01) {
       return next(
         new AppError(
-          `El total de pagos ($${totalPaid}) excede el total de la venta ($${total})`,
+          `El total de pagos ($${totalPaid}) excede el saldo a pagar ($${payableAmount}) después de aplicar vouchers`,
           400
         )
       );
@@ -180,7 +222,13 @@ exports.createSale = async (req, res, next) => {
     /* ---------- 8. Deducción atómica de stock ---------- */
     await stockService.deductStockForSale(saleItems);
 
-    /* ---------- 9. Crear venta ---------- */
+    /* ---------- 9. Distribuir vouchers y crear venta ------ */
+    const vouchersWithAmounts = voucherCodes.length > 0
+      ? voucherService.distributeAmount(voucherValidation.vouchers, voucherAmount)
+      : [];
+
+    const fullPaid = totalPaid >= payableAmount - 0.01;
+
     let sale;
     try {
       sale = await Sale.create({
@@ -195,6 +243,7 @@ exports.createSale = async (req, res, next) => {
         taxRate,
         taxAmount,
         total,
+        vouchersUsed: vouchersWithAmounts,
         payments: payments.map((p) => ({
           method: p.method,
           amount: Number(p.amount),
@@ -204,16 +253,29 @@ exports.createSale = async (req, res, next) => {
           installments: p.installments || 1,
           receivedBy: req.user._id,
         })),
-        paymentStatus:
-          totalPaid >= total - 0.01 ? 'paid' : totalPaid > 0 ? 'partial' : 'pending',
-        status: totalPaid >= total - 0.01 ? 'completed' : 'pending',
-        completedAt: totalPaid >= total - 0.01 ? new Date() : null,
+        paymentStatus: fullPaid ? 'paid' : totalPaid > 0 ? 'partial' : 'pending',
+        status: fullPaid ? 'completed' : 'pending',
+        completedAt: fullPaid ? new Date() : null,
         channel,
         notes: notes || null,
       });
     } catch (err) {
       await stockService.restoreStockForCancellation(saleItems);
       throw err;
+    }
+
+    /* ---------- 9b. Redimir vouchers ---------- */
+    if (vouchersWithAmounts.length > 0) {
+      try {
+        for (const v of vouchersWithAmounts) {
+          await voucherService.redeemVoucher(v.code, sale._id, v.amount, req.user._id);
+        }
+      } catch (voucherErr) {
+        // Rollback: eliminar la venta y restaurar stock
+        await Sale.findByIdAndDelete(sale._id);
+        await stockService.restoreStockForCancellation(saleItems);
+        throw voucherErr;
+      }
     }
 
     /* ---------- 10. Actualizar cliente ---------- */
@@ -272,6 +334,9 @@ exports.createSale = async (req, res, next) => {
       data: {
         sale: populatedSale,
         partnerSplits: splits,
+        vouchersUsed: sale.vouchersUsed,
+        voucherAmount: sale.voucherAmount,
+        payableAmount: sale.payableAmount,
         clientUpdated: client
           ? {
               _id: client._id,
@@ -289,12 +354,14 @@ exports.createSale = async (req, res, next) => {
               displayName: seller.displayName,
               role: seller.role,
               totalSales: seller.totalSales,
-              pendingCommission: seller.pendingCommission,
+                pendingCommission: seller.pendingCommission,
               hasCommission: seller.hasCommission(),
             }
           : null,
       },
-      message: 'Venta registrada correctamente',
+      message: sale.voucherAmount > 0
+          ? `Venta registrada. Aplicados $${sale.voucherAmount} en vouchers.`
+          : 'Venta registrada correctamente',
     });
   } catch (error) {
     next(error);
