@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const AppError = require('../utils/AppError');
+const { generateUniqueBarcode } = require('../services/barcodeService'); 
 
 const VOUCHER_TYPES = ['return_credit', 'gift', 'promotion', 'compensation'];
 const VOUCHER_STATUSES = ['active', 'redeemed', 'expired', 'cancelled'];
@@ -39,6 +40,11 @@ const voucherSchema = new mongoose.Schema(
       uppercase: true,
       trim: true,
       match: [/^[A-Z0-9-]+$/, 'El código solo puede contener letras, números y guiones'],
+    },
+    barcode: {
+      type: String,
+      trim: true,
+      default: null,
     },
     type: {
       type: String,
@@ -95,6 +101,7 @@ const voucherSchema = new mongoose.Schema(
  *  Índices
  * ========================================================= */
 voucherSchema.index({ code: 1 }, { unique: true });
+voucherSchema.index({ barcode: 1 }, { unique: true, sparse: true });
 voucherSchema.index({ clientId: 1, status: 1 });
 voucherSchema.index({ status: 1, expiresAt: 1 });
 voucherSchema.index({ type: 1, status: 1 });
@@ -125,21 +132,37 @@ voucherSchema.virtual('usedPercentage').get(function () {
 });
 
 /* =========================================================
- *  pre('save'): generar código único si no viene
+ *  pre('save'): generar código y barcode únicos si no vienen
  * ========================================================= */
 voucherSchema.pre('save', async function (next) {
-  if (!this.isNew || this.code) return next();
   try {
-    const prefix = PREFIX_MAP[this.type] || 'VCH';
-    for (let attempt = 0; attempt < 10; attempt++) {
-      const code = `${prefix}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-      const exists = await this.constructor.findOne({ code }).select('_id').lean();
-      if (!exists) {
-        this.code = code;
-        return next();
+    // 1. Generar código alfanumérico si no viene
+    if (this.isNew && !this.code) {
+      const prefix = PREFIX_MAP[this.type] || 'VCH';
+      let generated = false;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const candidate = `${prefix}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+        const exists = await this.constructor.findOne({ code: candidate }).select('_id').lean();
+        if (!exists) {
+          this.code = candidate;
+          generated = true;
+          break;
+        }
+      }
+      if (!generated) {
+        return next(new AppError('No se pudo generar un código único de voucher', 500));
       }
     }
-    return next(new AppError('No se pudo generar un código único de voucher', 500));
+
+    // 2. Generar barcode EAN-13 si no viene
+    if (this.isNew && !this.barcode) {
+      const prefix = String(process.env.VOUCHER_BARCODE_PREFIX || '777')
+        .padStart(3, '0')
+        .slice(0, 3);
+      this.barcode = await generateUniqueBarcode(this.constructor, 10, prefix);
+    }
+
+    next();
   } catch (err) {
     next(err);
   }
@@ -257,6 +280,18 @@ voucherSchema.methods.cancel = function (userId, reason) {
  * ========================================================= */
 voucherSchema.statics.findActiveByCode = function (code) {
   return this.findOne({ code: String(code).toUpperCase(), status: 'active' });
+};
+
+voucherSchema.statics.findByBarcode = function (barcode) {
+  return this.findOne({ barcode: String(barcode).trim() });
+};
+
+voucherSchema.statics.findActiveByBarcode = function (barcode) {
+  return this.findOne({
+    barcode: String(barcode).trim(),
+    status: 'active',
+    isActive: true,
+  });
 };
 
 voucherSchema.statics.findByClient = function (clientId, options = {}) {
