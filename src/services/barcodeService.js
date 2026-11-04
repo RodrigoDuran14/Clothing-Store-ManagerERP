@@ -60,20 +60,28 @@ const validateBarcode = (barcode) => {
  * Reintenta en caso de colisión (probabilidad prácticamente nula).
  *
  * @param {Model} Model - Modelo Mongoose con campo `barcode`
- * @param {number} maxAttempts
+ * @param {number} maxAttempts - Cantidad de reintentos
+ * @param {string} prefix - Prefijo de 3 dígitos (default '200' para productos)
  */
-const generateUniqueBarcode = async (Model, maxAttempts = 10) => {
+const generateUniqueBarcode = async (Model, maxAttempts = 10, prefix = '200') => {
   for (let i = 0; i < maxAttempts; i++) {
-    const code = generateEAN13();
+    const code = generateEAN13(prefix);
     const exists = await Model.findOne({ barcode: code }).select('_id').lean();
     if (!exists) return code;
   }
   throw new Error('No se pudo generar un código de barras único. Reintente.');
 };
 
+/**
+ * Verifica si un string parece ser un EAN-13 (13 dígitos numéricos).
+ * Útil para detectar si un input es un barcode o un código alfanumérico.
+ */
+const looksLikeEAN13 = (value) => /^\d{13}$/.test(String(value).trim());
+
 module.exports = {
   calculateCheckDigit,
   generateEAN13,
   validateBarcode,
   generateUniqueBarcode,
+  looksLikeEAN13
 };
