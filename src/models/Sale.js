@@ -21,6 +21,21 @@ const voucherUsedSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const appliedPromotionSchema = new mongoose.Schema(
+  {
+    promotionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Promotion',
+      required: true,
+    },
+    name: { type: String, required: true },
+    code: { type: String, default: null },
+    type: { type: String, required: true },
+    amount: { type: Number, required: true, min: 0 },
+  },
+  { _id: false }
+);
+
 const saleItemSchema = new mongoose.Schema(
   {
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
@@ -85,6 +100,8 @@ const saleSchema = new mongoose.Schema(
 
     payments: { type: [paymentSchema], default: [] },
     vouchersUsed: { type: [voucherUsedSchema], default: [] },
+    appliedPromotions: { type: [appliedPromotionSchema], default: [] },
+    promotionDiscount: { type: Number, default: 0, min: 0 },
     paymentStatus: { type: String, enum: PAYMENT_STATUSES, default: 'pending' },
 
     status: { type: String, enum: SALE_STATUSES, default: 'pending' },
@@ -127,6 +144,7 @@ saleSchema.index({ 'items.productId': 1 });
 saleSchema.index({ 'items.partnerId': 1 });
 saleSchema.index({ hasReturns: 1, createdAt: -1 });
 saleSchema.index({ originalSaleId: 1 }, { sparse: true });
+saleSchema.index({ 'appliedPromotions.promotionId': 1 });
 
 /* =========================================================
  *  Virtuals
@@ -159,6 +177,12 @@ saleSchema.virtual('itemCount').get(function () {
 
 saleSchema.virtual('returnableAmount').get(function () {
   return Math.max(0, Number((this.total - (this.returnedTotal || 0)).toFixed(2)));
+});
+
+saleSchema.virtual('totalDiscounts').get(function () {
+  return Number(
+    ((this.discountAmount || 0) + (this.promotionDiscount || 0)).toFixed(2)
+  );
 });
 
 /* =========================================================

@@ -8,6 +8,7 @@ const stockService = require('../services/stockService');
 const partnerSplitService = require('../services/partnerSplitService');
 const creditService = require('../services/creditService');
 const voucherService = require('../services/voucherService');
+const promotionService = require('../services/promotionService');
 const { paginate, formatPagination } = require('../utils/helpers');
 const { ROLES } = require('../config/roles');
 
@@ -61,6 +62,7 @@ exports.createSale = async (req, res, next) => {
       payments = [],
       channel = 'pos',
       notes,
+      couponCodes = [],
     } = req.body;
 
     /* ---------- 1. Validar cliente ---------- */
@@ -83,7 +85,7 @@ exports.createSale = async (req, res, next) => {
       }
     }
 
-    /* ---------- 3. Construir items con datos del producto ---------- */
+    /* ------ 3. Construir items con datos del producto ----- */
     const saleItems = [];
     for (const raw of rawItems) {
       const product = await Product.findById(raw.productId);
@@ -125,10 +127,11 @@ exports.createSale = async (req, res, next) => {
         discount,
         subtotal,
         partnerId: product.partnerId || null,
+        categoryId: product.categoryId || null,
       });
     }
 
-    /* ---------- 4. Calcular totales ---------- */
+        /* ---------- 4. Calcular totales ---------- */
     const subtotal = saleItems.reduce((s, i) => s + i.subtotal, 0);
 
     let discountAmount = 0;
@@ -139,10 +142,44 @@ exports.createSale = async (req, res, next) => {
     }
     discountAmount = Math.min(discountAmount, subtotal);
 
-    const afterDiscount = subtotal - discountAmount;
-    const taxAmount = Number(((afterDiscount * Number(taxRate)) / 100).toFixed(2));
-    const total = Number((afterDiscount + taxAmount).toFixed(2));
+    const afterOrderDiscount = Number((subtotal - discountAmount).toFixed(2));
 
+    /* ---------- 4b. Aplicar promociones ---------- */
+    const promotionResult = await promotionService.applyPromotions({
+      items: saleItems.map((i) => ({
+        productId: i.productId,
+        productName: i.productName,
+        categoryId: i.categoryId,
+        size: i.size,
+        color: i.color,
+        quantity: i.quantity,
+        unitPrice: i.unitPrice,
+      })),
+      subtotal: afterOrderDiscount,
+      clientId: client?._id || null,
+      clientCategory: client?.category || null,
+      channel,
+      couponCodes,
+    });
+
+    if (!promotionResult.ok) {
+      return next(
+        new AppError(
+          `Cupones inválidos: ${promotionResult.invalidCoupons
+            .map((c) => `${c.code} (${c.reason})`)
+            .join(', ')}`,
+          400
+        )
+      );
+    }
+
+    const promotionDiscount = promotionResult.totalDiscount;
+    const afterPromotions = Number(
+      (afterOrderDiscount - promotionDiscount).toFixed(2)
+    );
+
+    const taxAmount = Number(((afterPromotions * Number(taxRate)) / 100).toFixed(2));
+    const total = Number((afterPromotions + taxAmount).toFixed(2));
 
         /* ---------- 5. Validar vouchers (si vienen) ---------- */
     const voucherCodes = req.body.voucherCodes || [];
@@ -253,6 +290,8 @@ exports.createSale = async (req, res, next) => {
         discountType,
         discountValue,
         discountAmount,
+        promotionDiscount,
+        appliedPromotions: promotionResult.appliedPromotions,
         taxRate,
         taxAmount,
         total,
@@ -288,6 +327,21 @@ exports.createSale = async (req, res, next) => {
         await Sale.findByIdAndDelete(sale._id);
         await stockService.restoreStockForCancellation(saleItems);
         throw voucherErr;
+      }
+    }
+
+        /* ---------- 9c. Registrar usos de promociones ------ */
+    if (promotionResult.appliedPromotions.length > 0) {
+      try {
+        await promotionService.registerMultipleUsages(
+          promotionResult.appliedPromotions,
+          client?._id || null
+        );
+      } catch (err) {
+        console.error(
+          '⚠️  No se pudieron registrar usos de promociones:',
+          err.message
+        );
       }
     }
 
@@ -350,6 +404,8 @@ exports.createSale = async (req, res, next) => {
         vouchersUsed: sale.vouchersUsed,
         voucherAmount: sale.voucherAmount,
         payableAmount: sale.payableAmount,
+        appliedPromotions: promotionResult.appliedPromotions,
+        promotionDiscount: sale.promotionDiscount,
         clientUpdated: client
           ? {
               _id: client._id,
@@ -372,7 +428,9 @@ exports.createSale = async (req, res, next) => {
             }
           : null,
       },
-      message: sale.voucherAmount > 0
+      message:  sale.promotionDiscount > 0
+          ? `Venta registrada. ${promotionResult.appliedPromotions.length} promoción(es) aplicada(s) por $${sale.promotionDiscount}.`
+          : sale.voucherAmount > 0
           ? `Venta registrada. Aplicados $${sale.voucherAmount} en vouchers.`
           : 'Venta registrada correctamente',
     });

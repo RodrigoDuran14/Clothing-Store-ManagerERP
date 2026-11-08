@@ -78,6 +78,17 @@ const createSaleValidator = [
     .withMessage('Cada código de voucher debe ser un string no vacío')
     .isLength({ max: 50 }),
 
+      body('couponCodes')
+    .optional()
+    .isArray()
+    .withMessage('couponCodes debe ser un array'),
+  body('couponCodes.*')
+    .optional()
+    .isString()
+    .trim()
+    .notEmpty()
+    .isLength({ max: 30 }),
+
   body('channel')
     .optional()
     .isIn(CHANNELS)
