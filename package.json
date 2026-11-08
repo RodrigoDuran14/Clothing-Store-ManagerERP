@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "seed": "node scripts/seed.js"
+    "seed": "node scripts/seed.js",
+    "vouchers:expire": "node scripts/expireVouchers.js"
   },
   "keywords": ["mern", "express", "mongodb", "clothing-store", "ecommerce"],
   "author": "",
