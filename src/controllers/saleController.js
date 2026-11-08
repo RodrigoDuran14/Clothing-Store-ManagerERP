@@ -1,8 +1,11 @@
+const mongoose = require('mongoose');
 const Sale = require('../models/Sale');
 const Client = require('../models/Client');
 const Seller = require('../models/Seller');
 const Product = require('../models/Product');
 const Return = require('../models/Return');
+const Promotion = require('../models/Promotion');
+
 const AppError = require('../utils/AppError');
 const stockService = require('../services/stockService');
 const partnerSplitService = require('../services/partnerSplitService');
@@ -23,6 +26,7 @@ const buildSaleFilter = (query, user) => {
   if (query.channel) filter.channel = query.channel;
   if (query.clientId) filter.clientId = query.clientId;
   if (query.sellerId) filter.sellerId = query.sellerId;
+  if (query.promotionId) filter['appliedPromotions.promotionId'] = query.promotionId;
   if (query.hasReturns !== undefined) {
     filter.hasReturns = query.hasReturns === 'true';
   }
@@ -33,6 +37,7 @@ const buildSaleFilter = (query, user) => {
     if (query.to) filter.createdAt.$lte = new Date(query.to);
   }
 
+  // Partner: solo ve ventas con sus productos
   if (user && user.role === ROLES.PARTNER && user.partnerId) {
     filter['items.partnerId'] = user.partnerId;
   }
@@ -62,6 +67,7 @@ exports.createSale = async (req, res, next) => {
       payments = [],
       channel = 'pos',
       notes,
+      voucherCodes = [],
       couponCodes = [],
     } = req.body;
 
@@ -85,12 +91,16 @@ exports.createSale = async (req, res, next) => {
       }
     }
 
-    /* ------ 3. Construir items con datos del producto ----- */
+    /* ----- 3. Construir items con datos del producto ---- */
     const saleItems = [];
+    const categoryIdsSet = new Set();
+
     for (const raw of rawItems) {
       const product = await Product.findById(raw.productId);
       if (!product) {
-        return next(new AppError(`Producto no encontrado: ${raw.productId}`, 404));
+        return next(
+          new AppError(`Producto no encontrado: ${raw.productId}`, 404)
+        );
       }
       if (!product.isActive) {
         return next(new AppError(`Producto inactivo: ${product.name}`, 400));
@@ -116,6 +126,10 @@ exports.createSale = async (req, res, next) => {
       const discount = Number(raw.discount) || 0;
       const subtotal = Math.max(0, unitPrice * quantity - discount);
 
+      if (product.categoryId) {
+        categoryIdsSet.add(product.categoryId.toString());
+      }
+
       saleItems.push({
         productId: product._id,
         productName: product.name,
@@ -131,12 +145,14 @@ exports.createSale = async (req, res, next) => {
       });
     }
 
-        /* ---------- 4. Calcular totales ---------- */
+    /* ------ 4. Calcular subtotal y descuento manual ----- */
     const subtotal = saleItems.reduce((s, i) => s + i.subtotal, 0);
 
     let discountAmount = 0;
     if (discountType === 'percentage') {
-      discountAmount = Number(((subtotal * Number(discountValue)) / 100).toFixed(2));
+      discountAmount = Number(
+        ((subtotal * Number(discountValue)) / 100).toFixed(2)
+      );
     } else {
       discountAmount = Number(discountValue) || 0;
     }
@@ -144,7 +160,7 @@ exports.createSale = async (req, res, next) => {
 
     const afterOrderDiscount = Number((subtotal - discountAmount).toFixed(2));
 
-    /* ---------- 4b. Aplicar promociones ---------- */
+    /* ---------- 5. PROMOCIONES  ---------- */
     const promotionResult = await promotionService.applyPromotions({
       items: saleItems.map((i) => ({
         productId: i.productId,
@@ -163,13 +179,11 @@ exports.createSale = async (req, res, next) => {
     });
 
     if (!promotionResult.ok) {
+      const detail = promotionResult.invalidCoupons
+        .map((c) => `${c.code || ''} (${c.reason})`.trim())
+        .join(', ');
       return next(
-        new AppError(
-          `Cupones inválidos: ${promotionResult.invalidCoupons
-            .map((c) => `${c.code} (${c.reason})`)
-            .join(', ')}`,
-          400
-        )
+        new AppError(`Cupones inválidos: ${detail}`, 400)
       );
     }
 
@@ -178,22 +192,29 @@ exports.createSale = async (req, res, next) => {
       (afterOrderDiscount - promotionDiscount).toFixed(2)
     );
 
-    const taxAmount = Number(((afterPromotions * Number(taxRate)) / 100).toFixed(2));
+    /* ---------- 6. IVA y total ---------- */
+    const taxAmount = Number(
+      ((afterPromotions * Number(taxRate)) / 100).toFixed(2)
+    );
     const total = Number((afterPromotions + taxAmount).toFixed(2));
 
-        /* ---------- 5. Validar vouchers (si vienen) ---------- */
-    const voucherCodes = req.body.voucherCodes || [];
-    let voucherValidation = { valid: true, vouchers: [], totalAvailable: 0, issues: [] };
+    /* ---------- 7. VOUCHERS  ---------- */
+    let voucherValidation = {
+      valid: true,
+      vouchers: [],
+      totalAvailable: 0,
+      issues: [],
+    };
     let voucherAmount = 0;
     let payableAmount = total;
+    let vouchersWithAmounts = [];
+    let voucherBarcodeMap = {};
 
     if (voucherCodes.length > 0) {
       const productIds = saleItems.map((i) => i.productId);
-      const categoryIds = [];
-      for (const pid of productIds) {
-        const p = await Product.findById(pid).select('categoryId').lean();
-        if (p && p.categoryId) categoryIds.push(p.categoryId);
-      }
+      const categoryIds = [...categoryIdsSet].map(
+        (id) => new mongoose.Types.ObjectId(id)
+      );
 
       voucherValidation = await voucherService.validateMultipleForSale(
         voucherCodes,
@@ -207,37 +228,48 @@ exports.createSale = async (req, res, next) => {
       );
 
       if (!voucherValidation.valid) {
-        return next(
-          new AppError(
-            `Vouchers inválidos: ${voucherValidation.issues
-              .map((i) => `${i.code || ''} ${i.reason}`)
-              .join(', ')}`,
-            400
-          )
-        );
+        const detail = voucherValidation.issues
+          .map((i) => `${i.code || i.input || ''} (${i.reason})`.trim())
+          .join(', ');
+        return next(new AppError(`Vouchers inválidos: ${detail}`, 400));
       }
 
       voucherAmount = Math.min(voucherValidation.totalAvailable, total);
       payableAmount = Number((total - voucherAmount).toFixed(2));
+
+      vouchersWithAmounts = voucherService.distributeAmount(
+        voucherValidation.vouchers,
+        voucherAmount
+      );
+
+      for (const v of voucherValidation.vouchers) {
+        voucherBarcodeMap[v.code] = v.barcode || null;
+      }
     }
 
-    /* ---------- 6. Validar pagos (contra payableAmount) -----*/
-    const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
+    /* ------ 8. Validar payments contra payableAmount ----- */
+    const totalPaid = payments.reduce(
+      (s, p) => s + Number(p.amount || 0),
+      0
+    );
     if (totalPaid > payableAmount + 0.01) {
       return next(
         new AppError(
-          `El total de pagos ($${totalPaid}) excede el saldo a pagar ($${payableAmount}) después de aplicar vouchers`,
+          `El total de pagos ($${totalPaid}) excede el saldo a pagar ($${payableAmount}) después de aplicar promociones y vouchers`,
           400
         )
       );
     }
 
-    /* ---------- 6. Verificar crédito ---------- */
+    /* ---- 9. Verificar crédito si hay pago con credit ----- */
     const creditPayment = payments.find((p) => p.method === 'credit');
     if (creditPayment) {
       if (!client) {
         return next(
-          new AppError('Se requiere un cliente registrado para pagos con crédito', 400)
+          new AppError(
+            'Se requiere un cliente registrado para pagos con crédito',
+            400
+          )
         );
       }
       const check = await creditService.checkCreditBeforeSale(
@@ -249,35 +281,25 @@ exports.createSale = async (req, res, next) => {
       }
     }
 
-    /* ---------- 7. Verificar stock ---------- */
+    /* ---------- 10. Verificar stock ---------- */
     const stockCheck = await stockService.checkStockForSale(saleItems);
     if (!stockCheck.ok) {
       const reasons = stockCheck.issues.map((i) => i.message).join('. ');
       return next(new AppError(`No hay stock suficiente: ${reasons}`, 400));
     }
 
-    /* ---------- 8. Deducción atómica de stock ---------- */
+    /* ---------- 11. Deducción atómica de stock ---------- */
     await stockService.deductStockForSale(saleItems);
 
-    /* ---------- 9. Distribuir vouchers y crear venta ------ */
-    const vouchersWithAmounts = voucherCodes.length > 0
-      ? voucherService.distributeAmount(voucherValidation.vouchers, voucherAmount)
-      : [];
-
-    const fullPaid = totalPaid >= payableAmount - 0.01;
-
-        // Buscar los barcodes de los vouchers resueltos
-    const voucherBarcodeMap = {};
-    for (const v of voucherValidation.vouchers) {
-      voucherBarcodeMap[v.code] = v.barcode || null;
-    }
-
+    /* ---------- 12. Crear venta ---------- */
     const vouchersUsedEnriched = vouchersWithAmounts.map((v) => ({
       voucherId: v.voucherId,
       code: v.code,
       barcode: voucherBarcodeMap[v.code] || null,
       amount: v.amount,
     }));
+
+    const fullPaid = totalPaid >= payableAmount - 0.01;
 
     let sale;
     try {
@@ -305,7 +327,11 @@ exports.createSale = async (req, res, next) => {
           installments: p.installments || 1,
           receivedBy: req.user._id,
         })),
-        paymentStatus: fullPaid ? 'paid' : totalPaid > 0 ? 'partial' : 'pending',
+        paymentStatus: fullPaid
+          ? 'paid'
+          : totalPaid > 0
+          ? 'partial'
+          : 'pending',
         status: fullPaid ? 'completed' : 'pending',
         completedAt: fullPaid ? new Date() : null,
         channel,
@@ -316,21 +342,44 @@ exports.createSale = async (req, res, next) => {
       throw err;
     }
 
-    /* ---------- 9b. Redimir vouchers ---------- */
+    /* ---------- 13. Redimir vouchers (con rollback de los previos) ---------- */
     if (vouchersWithAmounts.length > 0) {
+      const redeemed = [];
       try {
         for (const v of vouchersWithAmounts) {
-          await voucherService.redeemVoucher(v.code, sale._id, v.amount, req.user._id);
+          const redeemedDoc = await voucherService.redeemVoucher(
+            v.code,
+            sale._id,
+            v.amount,
+            req.user._id
+          );
+          redeemed.push({ voucherId: redeemedDoc._id, amount: v.amount });
         }
       } catch (voucherErr) {
-        // Rollback: eliminar la venta y restaurar stock
+        // Rollback de vouchers ya redimidos
+        for (const r of redeemed) {
+          try {
+            await voucherService.refundVoucherUse(
+              r.voucherId,
+              sale._id,
+              r.amount,
+              req.user._id
+            );
+          } catch (rbErr) {
+            console.error(
+              `⚠️  Rollback de voucher ${r.voucherId} falló:`,
+              rbErr.message
+            );
+          }
+        }
+        // Rollback de venta y stock
         await Sale.findByIdAndDelete(sale._id);
         await stockService.restoreStockForCancellation(saleItems);
         throw voucherErr;
       }
     }
 
-        /* ---------- 9c. Registrar usos de promociones ------ */
+    /* ---------- 14. Registrar usos de promociones ---------- */
     if (promotionResult.appliedPromotions.length > 0) {
       try {
         await promotionService.registerMultipleUsages(
@@ -345,7 +394,7 @@ exports.createSale = async (req, res, next) => {
       }
     }
 
-    /* ---------- 10. Actualizar cliente ---------- */
+    /* ---------- 15. Actualizar cliente ---------- */
     if (client) {
       client.addPurchaseToHistory(
         sale._id,
@@ -376,44 +425,61 @@ exports.createSale = async (req, res, next) => {
       );
     }
 
-    /* ---------- 11. Actualizar vendedor ---------- */
+    /* ---------- 16. Actualizar vendedor ---------- */
     if (seller) {
       seller.recordSale({ amount: total, saleId: sale._id });
       await seller.save();
     }
 
-    /* ---------- 12. Splits de partners ---------- */
+    /* ---------- 17. Splits de partners ---------- */
     let splits = [];
     try {
       splits = await partnerSplitService.assignItemsToPartners(sale);
       await partnerSplitService.registerPartnerIncome(sale, splits);
     } catch (err) {
-      console.error('⚠️  PartnerSplit falló (no bloquea la venta):', err.message);
+      console.error(
+        '⚠️  PartnerSplit falló (no bloquea la venta):',
+        err.message
+      );
     }
 
-    /* ---------- 13. Respuesta ---------- */
+    /* ---------- 18. Respuesta ---------- */
     const populatedSale = await Sale.findById(sale._id)
       .populate('clientId', 'name phone email')
       .populate('sellerId', 'displayName role');
+
+    const messages = [];
+    if (promotionResult.appliedPromotions.length > 0) {
+      messages.push(
+        `${promotionResult.appliedPromotions.length} promoción(es) por $${promotionDiscount}`
+      );
+    }
+    if (sale.voucherAmount > 0) {
+      messages.push(`$${sale.voucherAmount} en vouchers`);
+    }
+    const detailMsg =
+      messages.length > 0 ? ` (${messages.join(', ')})` : '';
 
     res.status(201).json({
       success: true,
       data: {
         sale: populatedSale,
         partnerSplits: splits,
+        appliedPromotions: promotionResult.appliedPromotions,
+        promotionDiscount,
         vouchersUsed: sale.vouchersUsed,
         voucherAmount: sale.voucherAmount,
         payableAmount: sale.payableAmount,
-        appliedPromotions: promotionResult.appliedPromotions,
-        promotionDiscount: sale.promotionDiscount,
         clientUpdated: client
           ? {
               _id: client._id,
               name: client.name,
+              category: client.category,
               creditBalance: client.creditAccount.balance,
               availableCredit: Math.max(
                 0,
-                client.creditAccount.creditLimit - client.creditAccount.balance
+                client.creditAccount.creditLimit -
+                  client.creditAccount.balance
               ),
             }
           : null,
@@ -423,16 +489,12 @@ exports.createSale = async (req, res, next) => {
               displayName: seller.displayName,
               role: seller.role,
               totalSales: seller.totalSales,
-                pendingCommission: seller.pendingCommission,
+              pendingCommission: seller.pendingCommission,
               hasCommission: seller.hasCommission(),
             }
           : null,
       },
-      message:  sale.promotionDiscount > 0
-          ? `Venta registrada. ${promotionResult.appliedPromotions.length} promoción(es) aplicada(s) por $${sale.promotionDiscount}.`
-          : sale.voucherAmount > 0
-          ? `Venta registrada. Aplicados $${sale.voucherAmount} en vouchers.`
-          : 'Venta registrada correctamente',
+      message: `Venta registrada correctamente${detailMsg}`,
     });
   } catch (error) {
     next(error);
@@ -474,8 +536,7 @@ exports.getSales = async (req, res, next) => {
 };
 
 /* =========================================================
- *  GET /api/sales/:id[?include=returns]
- *  soporta incluir devoluciones
+ *  GET /api/sales/:id[?include=returns|exchange]
  * ========================================================= */
 exports.getSaleById = async (req, res, next) => {
   try {
@@ -500,8 +561,11 @@ exports.getSaleById = async (req, res, next) => {
 
     const data = { sale };
 
-    // incluir devoluciones si se pide
-    if (req.query.include && req.query.include.includes('returns')) {
+    const includes = String(req.query.include || '')
+      .split(',')
+      .map((s) => s.trim());
+
+    if (includes.includes('returns')) {
       data.returns = await Return.find({ saleId: sale._id })
         .sort({ createdAt: -1 })
         .select(
@@ -510,13 +574,10 @@ exports.getSaleById = async (req, res, next) => {
         .lean();
     }
 
-    // incluir venta de origen si es un exchange
-    if (req.query.include && req.query.include.includes('exchange')) {
-      if (sale.originalSaleId) {
-        data.exchangeSale = await Sale.findById(sale.originalSaleId)
-          .select('saleNumber total createdAt status')
-          .lean();
-      }
+    if (includes.includes('exchange') && sale.originalSaleId) {
+      data.exchangeSale = await Sale.findById(sale.originalSaleId)
+        .select('saleNumber total createdAt status')
+        .lean();
     }
 
     res.status(200).json({
@@ -551,6 +612,7 @@ exports.getSaleByNumber = async (req, res, next) => {
 
 /* =========================================================
  *  POST /api/sales/:id/payments
+ *  (usa Sale.addPayment → valida contra payableAmount)
  * ========================================================= */
 exports.addPayment = async (req, res, next) => {
   try {
@@ -559,10 +621,14 @@ exports.addPayment = async (req, res, next) => {
 
     const { method, amount, reference, installments, bankAccountId } = req.body;
 
+    // Si es pago con crédito, validar cliente + cupo
     if (method === 'credit') {
       if (!sale.clientId) {
         return next(
-          new AppError('Se requiere un cliente registrado para pagos con crédito', 400)
+          new AppError(
+            'Se requiere un cliente registrado para pagos con crédito',
+            400
+          )
         );
       }
       const check = await creditService.checkCreditBeforeSale(
@@ -585,6 +651,7 @@ exports.addPayment = async (req, res, next) => {
 
     await sale.save();
 
+    // Si es crédito, actualizar cuenta corriente del cliente
     if (method === 'credit') {
       const client = await Client.findById(sale.clientId);
       if (client) {
@@ -604,6 +671,8 @@ exports.addPayment = async (req, res, next) => {
         saleId: sale._id,
         saleNumber: sale.saleNumber,
         total: sale.total,
+        voucherAmount: sale.voucherAmount,
+        payableAmount: sale.payableAmount,
         paidAmount: sale.paidAmount,
         pendingBalance: sale.pendingBalance,
         paymentStatus: sale.paymentStatus,
@@ -617,8 +686,8 @@ exports.addPayment = async (req, res, next) => {
 };
 
 /* =========================================================
- *  POST /api/sales/:id/cancel
- *  solo pending. Las completadas van por /api/returns
+ *  POST /api/sales/:id/cancel  (solo pending)
+ *  Las completadas van por /api/returns
  * ========================================================= */
 exports.cancelSale = async (req, res, next) => {
   try {
@@ -626,11 +695,10 @@ exports.cancelSale = async (req, res, next) => {
     if (!sale) return next(new AppError('Venta no encontrada', 404));
 
     if (!sale.canCancel()) {
-      // Mensaje específico para redirigir a Módulo 8
       if (sale.status === 'completed') {
         return next(
           new AppError(
-            'Esta venta ya fue completada. Para devoluciones o reembolsos use vaya al modulo correspondiente',
+            'Esta venta ya fue completada. Para devoluciones o reembolsos use POST /api/returns',
             400
           )
         );
@@ -638,22 +706,73 @@ exports.cancelSale = async (req, res, next) => {
       if (['refunded', 'partially_refunded'].includes(sale.status)) {
         return next(
           new AppError(
-            `No se puede cancelar una venta en estado '${sale.status}'. Use el modulo correspondiente para procesar devoluciones.`,
+            `No se puede cancelar una venta en estado '${sale.status}'. Use /api/returns para procesar devoluciones.`,
             400
           )
         );
       }
       return next(
-        new AppError(`No se puede cancelar una venta en estado '${sale.status}'`, 400)
+        new AppError(
+          `No se puede cancelar una venta en estado '${sale.status}'`,
+          400
+        )
       );
     }
 
     const reason = req.body.reason || null;
 
-    // Restaurar stock
+    /* ---------- 1. Restaurar stock ---------- */
     await stockService.restoreStockForCancellation(sale.items);
 
-    // Revertir crédito del cliente (si aplica)
+    /* ---------- 2. Revertir vouchers usados ---------- */
+    if (sale.vouchersUsed && sale.vouchersUsed.length > 0) {
+      for (const v of sale.vouchersUsed) {
+        try {
+          await voucherService.refundVoucherUse(
+            v.voucherId,
+            sale._id,
+            v.amount,
+            req.user._id
+          );
+        } catch (vErr) {
+          console.error(
+            `⚠️  No se pudo revertir voucher ${v.code}:`,
+            vErr.message
+          );
+        }
+      }
+    }
+
+    /* ---------- 3. Revertir promociones (decrementar usos) ---------- */
+    if (sale.appliedPromotions && sale.appliedPromotions.length > 0) {
+      for (const p of sale.appliedPromotions) {
+        try {
+          await Promotion.updateOne(
+            { _id: p.promotionId },
+            {
+              $inc: { usageCount: -1 },
+            }
+          );
+          if (sale.clientId) {
+            await Promotion.updateOne(
+              { _id: p.promotionId },
+              {
+                $inc: {
+                  [`usageByClient.${sale.clientId.toString()}`]: -1,
+                },
+              }
+            );
+          }
+        } catch (pErr) {
+          console.error(
+            `⚠️  No se pudo revertir promoción ${p.promotionId}:`,
+            pErr.message
+          );
+        }
+      }
+    }
+
+    /* ---------- 4. Revertir crédito del cliente ---------- */
     if (sale.clientId) {
       const client = await Client.findById(sale.clientId);
       if (client) {
@@ -685,7 +804,7 @@ exports.cancelSale = async (req, res, next) => {
       }
     }
 
-    // Revertir métricas del vendedor
+    /* ---------- 5. Revertir métricas del vendedor ---------- */
     if (sale.sellerId) {
       const seller = await Seller.findById(sale.sellerId);
       if (seller) {
@@ -715,13 +834,14 @@ exports.cancelSale = async (req, res, next) => {
       }
     }
 
-    // Cancelar partner splits
+    /* ---------- 6. Cancelar partner splits ---------- */
     try {
       await partnerSplitService.cancelSplitsForSale(sale._id);
     } catch (err) {
       console.error('⚠️  Cancel partner splits falló:', err.message);
     }
 
+    /* ---------- 7. Cambiar estado ---------- */
     sale.changeStatus('cancelled', {
       reason,
       cancelledBy: req.user._id,
@@ -739,8 +859,10 @@ exports.cancelSale = async (req, res, next) => {
           cancellationReason: sale.cancellationReason,
         },
         stockRestored: sale.items.length,
+        vouchersReverted: (sale.vouchersUsed || []).length,
+        promotionsReverted: (sale.appliedPromotions || []).length,
       },
-      message: 'Venta cancelada correctamente. Stock restaurado.',
+      message: 'Venta cancelada correctamente. Stock y créditos restaurados.',
     });
   } catch (error) {
     next(error);
@@ -771,7 +893,8 @@ exports.getSalesSummary = async (req, res, next) => {
             _id: '$channel',
             count: { $sum: 1 },
             total: { $sum: '$total' },
-            returnedTotal: { $sum: '$returnedTotal' },   // 👈 NUEVO
+            returnedTotal: { $sum: '$returnedTotal' },
+            promotionDiscount: { $sum: '$promotionDiscount' },
           },
         },
       ]),
@@ -843,15 +966,30 @@ exports.getTopProducts = async (req, res, next) => {
  * ========================================================= */
 exports.getSaleStats = async (req, res, next) => {
   try {
-    const [byStatus, byPaymentStatus, recent30d, returnsAgg] = await Promise.all([
+    const [
+      byStatus,
+      byPaymentStatus,
+      recent30d,
+      returnsAgg,
+      promotionsAgg,
+      vouchersAgg,
+    ] = await Promise.all([
       Sale.aggregate([
-        { $group: { _id: '$status', count: { $sum: 1 }, total: { $sum: '$total' } } },
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+            total: { $sum: '$total' },
+          },
+        },
       ]),
       Sale.aggregate([{ $group: { _id: '$paymentStatus', count: { $sum: 1 } } }]),
       Sale.aggregate([
         {
           $match: {
-            createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+            createdAt: {
+              $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+            },
             status: { $in: ['completed', 'pending', 'partially_refunded'] },
           },
         },
@@ -861,11 +999,11 @@ exports.getSaleStats = async (req, res, next) => {
             count: { $sum: 1 },
             total: { $sum: '$total' },
             avgTicket: { $avg: '$total' },
-            returnedTotal: { $sum: '$returnedTotal' },   // 👈 NUEVO
+            returnedTotal: { $sum: '$returnedTotal' },
+            promotionDiscount: { $sum: '$promotionDiscount' },
           },
         },
       ]),
-      //métricas de devoluciones
       Sale.aggregate([
         { $match: { hasReturns: true } },
         {
@@ -875,6 +1013,32 @@ exports.getSaleStats = async (req, res, next) => {
             totalReturned: { $sum: '$returnedTotal' },
           },
         },
+      ]),
+      Sale.aggregate([
+        { $unwind: '$appliedPromotions' },
+        {
+          $group: {
+            _id: '$appliedPromotions.promotionId',
+            name: { $first: '$appliedPromotions.name' },
+            code: { $first: '$appliedPromotions.code' },
+            uses: { $sum: 1 },
+            totalDiscount: { $sum: '$appliedPromotions.amount' },
+          },
+        },
+        { $sort: { totalDiscount: -1 } },
+        { $limit: 10 },
+      ]),
+      Sale.aggregate([
+        { $unwind: '$vouchersUsed' },
+        {
+          $group: {
+            _id: '$vouchersUsed.code',
+            uses: { $sum: 1 },
+            totalApplied: { $sum: '$vouchersUsed.amount' },
+          },
+        },
+        { $sort: { totalApplied: -1 } },
+        { $limit: 10 },
       ]),
     ]);
 
@@ -894,11 +1058,14 @@ exports.getSaleStats = async (req, res, next) => {
           total: 0,
           avgTicket: 0,
           returnedTotal: 0,
+          promotionDiscount: 0,
         },
         returns: returnsAgg[0] || {
           salesWithReturns: 0,
           totalReturned: 0,
         },
+        topPromotions: promotionsAgg,
+        topVouchers: vouchersAgg,
       },
       message: 'Estadísticas de ventas obtenidas correctamente',
     });
